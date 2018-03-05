@@ -14,6 +14,7 @@
 package promql
 
 import (
+	"fmt"
 	"math"
 	"regexp"
 	"sort"
@@ -23,6 +24,8 @@ import (
 
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/pkg/labels"
+
+	"github.com/mjibson/go-dsp/fft"
 )
 
 // Function represents a function of the expression language and is
@@ -362,6 +365,64 @@ func funcScalar(ev *evaluator, args Expressions) Value {
 		V: v[0].V,
 		T: ev.Timestamp,
 	}
+}
+
+func funcAbsentOverTime(ev *evaluator, args Expressions) Value {
+	mat := ev.evalMatrix(args[0])
+	resultVector := Vector{}
+	// timeseries hash => Metric series
+	mh2m := make(map[uint64]Series)
+	// timeseries hash => [array of timestamp deltas between samples]
+	m2ts := make(map[uint64][]float64)
+	//
+	var time_min, time_max float64
+	time_min = math.MaxFloat64
+
+	// phase 1: collect all dT
+	for _, el := range mat {
+		if len(el.Points) == 0 {
+			continue
+		}
+		var hsh = el.Metric.Hash()
+		mh2m[hsh] = el
+		var previous_sample = float64(el.Points[0].T)
+		time_min = math.Min(time_min, previous_sample)
+		for _, v := range el.Points {
+			m2ts[hsh] = append(m2ts[hsh], float64(v.T)-previous_sample)
+			previous_sample = float64(v.T)
+		}
+		time_max = math.Max(time_max, previous_sample)
+	}
+	fmt.Printf("time_min: %v ==> time_max: %v\n", time_min, time_max)
+
+	// phase 2: Fourier transform across all metrics to get dominant frequency
+	for hsh, series := range mh2m {
+		// get sampling period from dominant
+		var period = real(fft.FFTReal(m2ts[hsh])[0]) / float64(len(m2ts[hsh]))
+		fmt.Printf("%v ==> period: %v\n", series.Metric, period)
+		// walk through the time window,
+		ts := time_min
+		curr_idx := 0
+		for ts <= time_max {
+			for mh2m[hsh].Points[curr_idx].T < int64(ts) {
+				curr_idx++
+			}
+			var found float64
+			if mh2m[hsh].Points[curr_idx].T == int64(ts) {
+				found = 1
+			} else {
+				found = 0
+			} // gotta love Go
+			fmt.Printf("+++ curr_idx: %v, v.T=%v ts=%v\n", curr_idx, mh2m[hsh].Points[curr_idx].T, int64(ts))
+			resultVector = append(resultVector, Sample{
+				Metric: series.Metric,
+				Point:  Point{V: found, T: int64(ts)},
+			})
+			fmt.Printf(" setting V=%v T=%v\n", found, ts)
+			ts += period
+		}
+	}
+	return resultVector
 }
 
 func aggrOverTime(ev *evaluator, args Expressions, aggrFn func([]Point) float64) Value {
@@ -966,6 +1027,12 @@ var functions = map[string]*Function{
 		ArgTypes:   []ValueType{ValueTypeVector},
 		ReturnType: ValueTypeVector,
 		Call:       funcAbsent,
+	},
+	"absent_over_time": {
+		Name:       "absent_over_time",
+		ArgTypes:   []ValueType{ValueTypeMatrix},
+		ReturnType: ValueTypeVector,
+		Call:       funcAbsentOverTime,
 	},
 	"avg_over_time": {
 		Name:       "avg_over_time",

@@ -117,3 +117,42 @@ func TestDeriv(t *testing.T) {
 		t.Fatalf("Expected 0.0 as value, got %f", vec[0].V)
 	}
 }
+
+func TestAbsentOverTime(t *testing.T) {
+	storage := testutil.NewStorage(t)
+	defer storage.Close()
+	engine := NewEngine(nil, nil, 10, 10*time.Second)
+
+	a, err := storage.Appender()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var basetime int64 = 1493712816900
+	metric := labels.FromStrings("__name__", "foo")
+	a.Add(metric, basetime+60000, 1.0)
+	a.Add(metric, basetime+120000, 1.0)
+	// no sample for baseT+180 sec
+	a.Add(metric, basetime+240000, 1.0)
+
+	if err := a.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	query, err := engine.NewInstantQuery(storage, "absent_over_time(foo[5m])", timestamp.Time(basetime+300000))
+	if err != nil {
+		t.Fatalf("Error parsing query: %s", err)
+	}
+	result := query.Exec(context.Background())
+	if result.Err != nil {
+		t.Fatalf("Error running query: %s", result.Err)
+	}
+	vec, _ := result.Vector()
+	if len(vec) != 4 {
+		t.Fatalf("Expected 4 results, got %d", len(vec))
+	}
+	/* TODO
+	if vec[0].V != 0.0 {
+		t.Fatalf("Expected 0.0 as value, got %f", vec[0].V)
+	}
+	*/
+}
